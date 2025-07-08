@@ -1322,17 +1322,20 @@ class AdvancedSymptomAnalyzer:
         self.mental_health_classifier = None
         
         try:
+            # Force CPU usage (device=-1) to prevent meta tensor errors
             self.emotion_classifier = pipeline(
                 "text-classification",
                 model="j-hartmann/emotion-english-distilroberta-base",
-                return_all_scores=True
+                return_all_scores=True,
+                device=-1  # Force CPU to avoid meta tensor errors
             )
             self.mental_health_classifier = pipeline(
                 "sentiment-analysis",
                 model="cardiffnlp/twitter-roberta-base-sentiment-latest",
-                return_all_scores=True
+                return_all_scores=True,
+                device=-1  # Force CPU to avoid meta tensor errors
             )
-            logger.info("✅ Emotion classifiers loaded")
+            logger.info("✅ Emotion classifiers loaded on CPU")
         except Exception as e:
             logger.error(f"❌ Could not load classifiers: {e}")
     
@@ -1706,8 +1709,10 @@ class EnhancedAudioService:
     def __init__(self, model_name="base"):
         self.model = None
         try:
+            # Load the model and explicitly move it to CPU to prevent meta tensor errors
             self.model = whisper.load_model(model_name)
-            logger.info(f"🔊 Loaded Whisper model: {model_name}")
+            self.model = self.model.cpu()  # Explicitly move to CPU to avoid meta tensor issues
+            logger.info(f"🔊 Loaded Whisper model: {model_name} on CPU device")
         except Exception as e:
             logger.error(f"❌ Whisper load failed: {e}")
     
@@ -1973,19 +1978,27 @@ def configure_cors():
     @app.after_request
     def add_cors_headers(response):
         """Ensure CORS headers are set and override any duplicates"""
-        # Handle preflight OPTIONS requests first
-        if request.method == 'OPTIONS':
+        # Prevent redirects on preflight requests
+        if request.method == 'OPTIONS' and response.status_code in [301, 302, 307, 308]:
+            # Convert redirects to 200 OK for preflight requests
             response = make_response()
             response.status_code = 200
+            
         # Ensure only one value for each CORS header
         # Remove any existing duplicate headers first
         response.headers.pop('Access-Control-Allow-Origin', None)
         response.headers.pop('Access-Control-Allow-Headers', None)
         response.headers.pop('Access-Control-Allow-Methods', None)
+        
         # Set CORS headers to allow any origin and methods
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Requested-With,Cache-Control,Accept,Pragma'
         response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+        
+        # Set proper content type for API responses if not already set
+        if request.path.startswith('/api/') and not response.headers.get('Content-Type'):
+            response.headers['Content-Type'] = 'application/json'
+            
         return response
     
     # Add a special route for ngrok authorization checks
@@ -2693,9 +2706,18 @@ def status():
     return response
 
 
-@app.route("/api/chat", methods=["POST"])
+@app.route("/api/chat", methods=["POST", "OPTIONS"])
 def enhanced_chat():
     """Main chat endpoint with multimodal support"""
+    # Handle OPTIONS preflight request
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Cache-Control,Accept,Pragma')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        response.headers.add('Access-Control-Max-Age', '600')
+        response.status_code = 200
+        return response
     # Handle both JSON and FormData
     if request.content_type and 'multipart/form-data' in request.content_type:
         message = request.form.get("message", "")
@@ -2979,9 +3001,18 @@ def search_resources():
     return jsonify({"resources": resources, "total": len(resources)})
 
 
-@app.route("/api/crisis/assess", methods=["POST"])
+@app.route("/api/crisis/assess", methods=["POST", "OPTIONS"])
 def assess_crisis():
     """Crisis assessment endpoint"""
+    # Handle OPTIONS preflight request
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Cache-Control,Accept,Pragma')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        response.headers.add('Access-Control-Max-Age', '600')
+        response.status_code = 200
+        return response
     data = request.json
     message = data.get("message", "")
     user_id = data.get("user_id")
@@ -3007,9 +3038,18 @@ def assess_crisis():
     })
 
 
-@app.route("/api/session/create", methods=["POST"])
+@app.route("/api/session/create", methods=["POST", "OPTIONS"])
 def create_session():
     """Create new therapy session"""
+    # Handle OPTIONS preflight request
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Cache-Control,Accept,Pragma')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        response.headers.add('Access-Control-Max-Age', '600')
+        response.status_code = 200
+        return response
     data = request.json
     user_id = data.get("user_id")
     

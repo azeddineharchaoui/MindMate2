@@ -56,6 +56,9 @@ const ChatPage = () => {
     const audioChunksRef = useRef<Blob[]>([]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const hasProcessedRef = useRef(false);
+    // Add missing refs for streaming functionality
+    const streamingBufferRef = useRef<string[]>([]);
+    const isProcessingRef = useRef(false);
 
     useEffect(() => {
         // Initialize session
@@ -174,11 +177,12 @@ const ChatPage = () => {
 
         // This will hold the complete message for saving at the end
         let finalContent = "";
-
-        const history = messages.map((msg) => ({
-            role: msg.type === "user" ? "user" : "assistant",
-            content: msg.content,
-        }));
+        
+        // Create a simplified history object
+        const history = messages.map(msg => [
+            msg.type === "user" ? "user" : "assistant", 
+            msg.content
+        ]) as [string, string][];
 
         try {
             await streamChatCompletion(
@@ -187,24 +191,43 @@ const ChatPage = () => {
                     audioFile: audioBlob || undefined,
                     history,
                     patient_type: "general",
+                    user_id: sessionId?.split('_')[1] || "demo_user",
+                    session_id: sessionId || undefined
                 },
                 {
                     onToken: (token) => {
-                        // Append the new token to the previous content
-                        setStreamingState(true, token);
-
-                        // Also build up the final content in our local variable
+                        // If the token is empty, ignore it (likely metadata)
+                        if (token === "") return;
+                        
+                        // If the token contains metadata, ignore it
+                        try {
+                            if (typeof token === 'string' && token.trim().startsWith('{')) {
+                                const parsed = JSON.parse(token);
+                                if (parsed && parsed.metadata) {
+                                    return; // Skip metadata tokens
+                                }
+                            }
+                        } catch (e) {
+                            // Not JSON, continue normally
+                        }
+                        
+                        // Add token to accumulated content
                         finalContent += token;
+                        
+                        // Update the streaming content in the UI
+                        setStreamingState(true, finalContent);
                     },
                     onComplete: () => {
                         // Use the complete, locally accumulated message
-                        const aiMessage = {
-                            id: Date.now().toString(),
-                            type: "ai" as const,
-                            content: finalContent, // Use the complete message here
-                            timestamp: new Date(),
-                        };
-                        addMessage(aiMessage);
+                        if (finalContent.trim()) {
+                            const aiMessage = {
+                                id: Date.now().toString(),
+                                type: "ai" as const,
+                                content: finalContent, // Use the complete message here
+                                timestamp: new Date(),
+                            };
+                            addMessage(aiMessage);
+                        }
 
                         // Reset the streaming state completely
                         setStreamingState(false, ""); // Clear streaming content
@@ -287,9 +310,10 @@ const ChatPage = () => {
                                             src={message.audioUrl}
                                             className="w-[250px] rounded-lg"
                                             style={{
-                                                '--track-color': message.type === 'user' ? '#ffffff40' : '#00000020',
-                                                '--thumb-color': message.type === 'user' ? '#ffffff' : '#3b82f6'
-                                            }}
+                                                // Use CSS variables with standard properties
+                                                '--webkit-media-controls-current-time-display': 'color-scheme',
+                                                '--webkit-media-controls-time-remaining-display': 'color-scheme'
+                                            } as React.CSSProperties}
                                         />
                                     </div>
                                 ) : (
@@ -315,20 +339,34 @@ const ChatPage = () => {
 
                     {isStreaming && (
                         <div className="flex justify-start">
-                            <div className={`max-w-3xl rounded-2xl px-5 py-4 ${theme === "dark" ? "bg-gray-800 text-white" : "bg-white text-gray-800 border border-gray-200"}`}>
-                                <div className="flex items-center space-x-2 mb-1">
-                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center ${theme === "dark" ? "bg-cyan-500" : "bg-blue-500"}`}>
-                                        <svg className="h-5 w-5 text-white" viewBox="0 0 20 20" fill="currentColor">
-                                            <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+                            <div className={`max-w-[85%] rounded-3xl px-4 py-3 ${theme === "dark" ? "bg-gray-800 text-gray-100" : "bg-gray-50 text-gray-800 shadow-sm"}`} 
+                                style={{
+                                    boxShadow: theme !== "dark" ? "0 1px 2px rgba(0,0,0,0.05)" : "none"
+                                }}>
+                                {/* Header with avatar and name */}
+                                <div className="flex items-center space-x-3 mb-2">
+                                    <div className={`w-9 h-9 rounded-full flex items-center justify-center ${
+                                        theme === "dark" ? "bg-cyan-400/90" : "bg-gradient-to-r from-cyan-500 to-blue-500"
+                                    }`}>
+                                        <svg className="h-5 w-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                                         </svg>
                                     </div>
-                                    <span className="font-medium">AI Assistant</span>
+                                    <span className="font-semibold text-sm">
+                                        Medi Mate
+                                    </span>
                                 </div>
-                                <p>
+                                
+                                {/* Message content */}
+                                <p className={`whitespace-pre-wrap text-sm/relaxed`}>
                                     {streamingContent}
                                     <span className="ml-1 inline-block h-4 w-1 bg-current align-middle animate-blink"></span>
                                 </p>
-                                <div className="text-xs opacity-70 mt-2">
+                                
+                                {/* Timestamp */}
+                                <div className={`text-xs mt-2 ${
+                                    theme === "dark" ? "text-gray-400" : "text-gray-500"
+                                }`}>
                                     {new Date().toLocaleTimeString([], {
                                         hour: "2-digit",
                                         minute: "2-digit",
@@ -396,7 +434,8 @@ const ChatPage = () => {
                 </div>
             </div>
 
-            <style jsx global>{`
+            <style dangerouslySetInnerHTML={{
+                __html: `
                 @keyframes blink {
                     0%, 100% { opacity: 1; }
                     50% { opacity: 0; }
@@ -404,7 +443,8 @@ const ChatPage = () => {
                 .animate-blink {
                     animation: blink 1s step-end infinite;
                 }
-            `}</style>
+                `
+            }} />
         </div>
     );
 };

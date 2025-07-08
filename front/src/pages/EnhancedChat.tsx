@@ -255,8 +255,8 @@ const ChatPage = () => {
                 },
                 {
                     onToken: (token) => {
-                        setStreamingState(true, token);
                         finalContent += token;
+                        setStreamingState(true, finalContent);
                     },
                     onComplete: () => {
                         const aiMessage = {

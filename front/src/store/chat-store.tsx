@@ -16,8 +16,8 @@ export interface Message {
 interface ChatStore {
     messages: Message[]
     isTyping: boolean
-    isStreaming: false,
-    streamingContent: "",
+    isStreaming: boolean,
+    streamingContent: string,
     patientType: string
     hasEmergency: boolean
     addMessage: (msg: Message) => void
@@ -46,9 +46,38 @@ export const useChatStore = create<ChatStore>((set) => ({
         if (content === undefined) {
             return { isStreaming };
         }
+        
+        // If we're starting a new streaming session or clearing content
+        if (!isStreaming || content === "") {
+            return {
+                isStreaming,
+                streamingContent: content
+            };
+        }
+        
+        // For JSON token objects that may be sent directly from the backend
+        let processedContent = content;
+        try {
+            if (typeof content === 'string' && content.trim().startsWith('{') && content.trim().endsWith('}')) {
+                const parsed = JSON.parse(content);
+                if (parsed && parsed.token !== undefined) {
+                    processedContent = parsed.token;
+                }
+                // Ignore metadata objects
+                if (parsed && (parsed.metadata || parsed.session_id)) {
+                    return { isStreaming }; // Don't update content for metadata
+                }
+            }
+        } catch (e) {
+            // Not JSON or failed parsing, use as-is
+            processedContent = content;
+        }
+        
+        // Since we now pass the accumulated content from the component,
+        // we just need to set it directly instead of appending
         return {
             isStreaming,
-            streamingContent: isStreaming ? state.streamingContent + content : content
+            streamingContent: processedContent
         };
     }),
 

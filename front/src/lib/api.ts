@@ -8,11 +8,94 @@ import axios, { AxiosResponse, AxiosRequestConfig } from "axios"
 // For hosted backend: use the ngrok URL from the backend
 const isDev = import.meta.env.DEV;
 // Always use explicit URLs instead of empty string to avoid CORS issues
-export const API_BASE_URL = import.meta.env.VITE_API_URL || "https://e8bd-34-124-236-199.ngrok-free.app";
+export const API_BASE_URL = import.meta.env.VITE_API_URL || "https://60b8eae95df1.ngrok-free.app";
 
-console.log("API_BASE_URL:", API_BASE_URL);
+// Configure Axios defaults for better CORS handling
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  }
+});
+
+// Add request interceptor for CORS headers
+api.interceptors.request.use((config) => {
+  // Ensure headers are defined
+  config.headers = config.headers || {};
+  
+  // Add cache control headers
+  config.headers['Cache-Control'] = 'no-cache';
+  config.headers['Pragma'] = 'no-cache';
+  
+  // For FormData requests, let the browser set the Content-Type
+  if (config.data instanceof FormData) {
+    delete config.headers['Content-Type'];
+  }
+  
+  return config;
+});
+
+// Add response interceptor for error handling
+api.interceptors.response.use(
+  (response) => {
+    // Check if response is HTML instead of JSON
+    const contentType = response.headers['content-type'] || '';
+    
+    // Special handling for HTML responses which are likely ngrok authorization pages
+    if (contentType.includes('text/html') && 
+        !contentType.includes('application/json') && 
+        response.data && 
+        typeof response.data === 'string' && 
+        (response.data.includes('ngrok') || response.data.includes('tunnel'))) {
+      
+      console.warn('Received HTML response from API - likely ngrok authorization page');
+      
+      // Update ngrok auth state
+      setNgrokAuthState(false);
+      
+      // For API endpoints, we can create a modified error response
+      if (response.config.url?.includes('/api/')) {
+        // Create a proper error with custom code
+        const error = new Error('Ngrok authorization required');
+        return Promise.reject(Object.assign(error, {
+          response: {
+            status: 499, // Custom status code for ngrok auth required
+            data: {
+              error: 'ngrok_auth_required',
+              message: 'Ngrok tunnel requires authorization. Please visit the ngrok URL directly in a new tab to authorize.',
+              ngrokUrl: API_BASE_URL
+            }
+          },
+          isNgrokAuthError: true
+        }));
+      }
+    }
+    
+    // Mark successful JSON responses
+    if (contentType.includes('application/json')) {
+      localStorage.setItem('mindmate_api_success_time', Date.now().toString());
+      setNgrokAuthState(true);
+    }
+    
+    return response;
+  },
+  (error) => {
+    if (error.response?.status === 401) {
+      // Handle unauthorized
+      console.error('Unauthorized request:', error);
+    } else if (error.response?.status === 400) {
+      // Handle bad request
+      console.error('Bad request:', error);
+    }
+    return Promise.reject(error);
+  }
+);
 
 // Track ngrok tunnel authorization state using localStorage for persistence across page loads
+// Global var to track ngrok authorization state
+let ngrokAuthorized: boolean;
+
 const getNgrokAuthState = (): boolean => {
   const state = localStorage.getItem('mindmate_ngrok_authorized');
   // Also check if we have a successful API request timestamp
@@ -39,6 +122,9 @@ const setNgrokAuthState = (state: boolean): void => {
   ngrokAuthorized = state;
 };
 
+// Initialize the global variable
+ngrokAuthorized = getNgrokAuthState();
+
 // Record a successful API call to indicate ngrok is authorized
 const recordSuccessfulApiCall = (): void => {
   localStorage.setItem('mindmate_api_success_time', Date.now().toString());
@@ -49,7 +135,7 @@ const recordSuccessfulApiCall = (): void => {
   }
 };
 
-let ngrokAuthorized = getNgrokAuthState();
+ngrokAuthorized = getNgrokAuthState();
 let ngrokAuthorizing = false;
 let lastNgrokAuthAttempt = parseInt(localStorage.getItem('mindmate_ngrok_auth_time') || '0');
 
@@ -423,17 +509,6 @@ export const checkApiConnection = async (): Promise<boolean> => {
     return false;
   }
 };
-
-// Set up axios instance with authentication
-const api = axios.create({
-  baseURL: API_BASE_URL,
-  timeout: 60000, // Increased timeout for potentially long PDF generation
-  headers: {
-    'Content-Type': 'application/json',
-  },
-  // Handle CORS issues
-  withCredentials: false // Don't send cookies with cross-origin requests
-});
 
 // Cache object to store responses
 const responseCache: Record<string, {data: any, timestamp: number}> = {};
@@ -832,100 +907,126 @@ export async function streamChatCompletion(
     request: ChatRequest,
     callbacks: StreamCallbacks
 ): Promise<void> {
-  const formData = new FormData();
+  // Determine if we're sending FormData or JSON
+  const hasFiles = request.audioFile !== undefined;
+  let body;
+  let headers = {};
   
-  // Include message if present
-  if (request.message) {
-    formData.append("message", request.message);
+  if (hasFiles) {
+    // Use FormData when we have files
+    body = new FormData();
+    if (request.message) {
+      body.append("message", request.message);
+    }
+    if (request.audioFile) {
+      body.append("audio_file", request.audioFile, "audio.wav");
+    }
+    if (request.user_id) {
+      body.append("user_id", request.user_id);
+    }
+    if (request.session_id) {
+      body.append("session_id", request.session_id);
+    }
+  } else {
+    // Use JSON when we only have text data
+    body = JSON.stringify({
+      message: request.message,
+      user_id: request.user_id,
+      session_id: request.session_id,
+      history: request.history
+    });
+    headers = {
+      'Content-Type': 'application/json'
+    };
   }
 
-  // Include audio file if present
-  if (request.audioFile) {
-    formData.append("audio_file", request.audioFile, "audio.wav");
-  }
+  const url = API_BASE_URL ? `${API_BASE_URL}/api/chat` : '/api/chat';
   
-  // Include user_id if present
-  if (request.user_id) {
-    formData.append("user_id", request.user_id);
-  }
-  
-  // Include session_id if present
-  if (request.session_id) {
-    formData.append("session_id", request.session_id);
-  }
-
-  // Include history and patient type if present
-  if (request.history) {
-    formData.append("history", JSON.stringify(request.history));
-  }
-  
-  if (request.patient_type) {
-    formData.append("patient_type", request.patient_type);
-  }
-
   try {
-    // Use API_BASE_URL if not empty, otherwise use relative URL for proxy
-    const url = API_BASE_URL ? `${API_BASE_URL}/api/chat` : '/api/chat';
     const response = await fetch(url, {
-      method: "POST",
-      body: formData,
+      method: 'POST',
+      body,
+      headers,
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      const errorText = await response.text();
+      throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
     }
 
-    if (!response.body) {
-      throw new Error("Response body is null");
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('Response body is null');
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-
+    // Start reading the stream
+    let receivedMetadata = false;
+    
     while (true) {
       const { done, value } = await reader.read();
-      
       if (done) {
         callbacks.onComplete();
         break;
       }
 
-      // Decode the chunk and process it
-      const chunk = decoder.decode(value);
+      // Convert bytes to text
+      const text = new TextDecoder().decode(value);
       
-      // Split by newlines to handle multiple events
-      const lines = chunk.split('\n');
+      // Handle different line formats in the response
+      const lines = text.split('\n');
       
       for (const line of lines) {
         if (!line.trim()) continue;
         
         try {
-          const data = JSON.parse(line);
-          
-          // Handle different response formats
-          if (data.error) {
-            callbacks.onError(data.error);
-            return;
-          }
-          
-          // Handle token response
-          if (data.token !== undefined) {
-            callbacks.onToken(data.token);
-          }
-          
-          // Handle complete message response
-          if (data.response) {
-            callbacks.onToken(data.response);
+          // Try to parse as JSON
+          if (line.trim().startsWith('{') && line.trim().endsWith('}')) {
+            const jsonData = JSON.parse(line);
+            
+            // Check if it's a token object
+            if (jsonData.token !== undefined) {
+              // If we get an empty token with metadata, we've reached the end of content
+              if (jsonData.token === '' && jsonData.metadata) {
+                receivedMetadata = true;
+                // Skip sending the empty token and metadata
+                continue;
+              }
+              
+              // Otherwise, send the token text to the client
+              if (jsonData.token.trim() !== '') {
+                callbacks.onToken(jsonData.token);
+              }
+            } else if (jsonData.metadata) {
+              // If it's only metadata, skip it
+              continue;
+            } else {
+              // Some other JSON object, pass it through as a string
+              callbacks.onToken(JSON.stringify(jsonData));
+            }
+          } else {
+            // Not JSON, just send as raw text if not empty
+            if (line.trim() !== '') {
+              callbacks.onToken(line);
+            }
           }
         } catch (e) {
-          console.warn("Failed to parse chunk:", line, e);
-          // Don't throw error for parse failures, as some chunks might be incomplete
+          // If parsing fails, just send the raw line
+          if (line.trim() !== '') {
+            callbacks.onToken(line);
+          }
         }
       }
+      
+      // If we received the metadata, we're done
+      if (receivedMetadata) {
+        callbacks.onComplete();
+        break;
+      }
     }
-  } catch (error: any) {
-    console.error("Chat streaming error:", error);
-    callbacks.onError(error.message || "An error occurred during chat streaming");
+  } catch (e) {
+    console.error("Chat streaming error:", e);
+    const err = e as Error;
+    callbacks.onError(err.message || "An error occurred during chat streaming");
   }
 }
 
@@ -2103,7 +2204,7 @@ export async function loginUser(data: LoginRequest): Promise<AuthResponse> {
 export function logoutUser(): void {
   localStorage.removeItem('mindmate_token');
   localStorage.removeItem('mindmate_user_id');
-  localStorage.removeItem('mindmate_email');
+   localStorage.removeItem('mindmate_email');
   localStorage.removeItem('mindmate_password');
 }
 
@@ -2131,8 +2232,7 @@ async function refreshAuthToken(): Promise<string | null> {
       }
     } catch (error) {
       console.error("Failed to refresh token with stored credentials:", error);
-      // Clear invalid stored credentials
-      localStorage.removeItem('mindmate_password');
+      // Clear invalid stored credentials      localStorage.removeItem('mindmate_password');
     }
   }
   
@@ -2140,3 +2240,43 @@ async function refreshAuthToken(): Promise<string | null> {
   console.warn("Could not refresh authentication token automatically");
   return null;
 }
+
+// Global var to track ngrok authorization state
+ngrokAuthorized = getNgrokAuthState();
+
+// Export function to check if ngrok is authorized
+export const checkNgrokAuth = async (): Promise<{
+  authorized: boolean;
+  message?: string;
+  apiUrl: string;
+}> => {
+  try {
+    // Try to fetch the special ngrok check endpoint
+    const response = await api.get('/api/ngrok-check');
+    
+    // If successful, update authorization state
+    setNgrokAuthState(true);
+    return { 
+      authorized: true, 
+      apiUrl: API_BASE_URL 
+    };
+  } catch (error: any) {
+    // If we get a special ngrok auth error, mark as unauthorized
+    if (error.isNgrokAuthError || error.response?.data?.error === 'ngrok_auth_required') {
+      setNgrokAuthState(false);
+      
+      return {
+        authorized: false,
+        message: `Ngrok tunnel requires authorization. Please open ${API_BASE_URL} in a new browser tab to authorize, then refresh this page.`,
+        apiUrl: API_BASE_URL
+      };
+    }
+    
+    // For other errors, check if we were previously authorized
+    return {
+      authorized: ngrokAuthorized,
+      apiUrl: API_BASE_URL,
+      message: ngrokAuthorized ? undefined : 'Could not verify ngrok authorization status.'
+    };
+  }
+};
