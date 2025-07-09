@@ -8,7 +8,7 @@ import axios, { AxiosResponse, AxiosRequestConfig } from "axios"
 // For hosted backend: use the ngrok URL from the backend
 const isDev = import.meta.env.DEV;
 // Always use explicit URLs instead of empty string to avoid CORS issues
-export const API_BASE_URL = import.meta.env.VITE_API_URL || "https://60b8eae95df1.ngrok-free.app";
+export const API_BASE_URL = import.meta.env.VITE_API_URL || "https://raleigh-grow-optics-pattern.trycloudflare.com";
 
 // Configure Axios defaults for better CORS handling
 const api = axios.create({
@@ -1792,16 +1792,35 @@ export async function getTherapyModules(): Promise<TherapyModules> {
 }
 
 // Enhanced Audio Transcription
-export async function transcribeAudio(audioFile: Blob): Promise<any> {
-  const formData = new FormData()
-  formData.append("audio", audioFile)
+export async function transcribeAudio(audioFile: Blob, userId?: string, sessionId?: string): Promise<any> {
+  // Check if the blob is empty or not valid
+  if (!audioFile || audioFile.size === 0) {
+    console.error("Empty audio file provided to transcribeAudio");
+    throw new Error("Empty audio file");
+  }
   
-  const response = await api.post("/api/transcribe", formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data'
-    }
-  })
-  return response.data
+  // Create WAV blob - ensure proper format
+  // Using audio/wav with codec=1 for PCM encoding
+  const formData = new FormData()
+  
+  // Use "audio_file" to match the backend expectations
+  formData.append("audio_file", audioFile, "recording.wav")
+  if (userId) formData.append("user_id", userId);
+  if (sessionId) formData.append("session_id", sessionId);
+
+  console.log(`Sending audio file for transcription. Size: ${audioFile.size} bytes`);
+  
+  try {
+    const response = await api.post("/api/transcribe", formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+    return response.data
+  } catch (error) {
+    console.error("Audio transcription failed:", error);
+    throw error;
+  }
 }
 
 // Export Comprehensive Report

@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useRef } from "react"
+import React, { useState, useRef, useEffect } from "react"
 import { useTheme } from "@/components/ThemeContext"
 import HeaderCompo from "@/pages/components/Header"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -21,10 +21,12 @@ import {
   Brain,
   FileText
 } from "lucide-react"
-import { transcribeAudio } from "@/lib/api"
+import { createSession, transcribeAudio } from "@/lib/api"
+import { useUserStore } from '@/store/user-store'
 
 const AudioTranscription: React.FC = () => {
   const { theme } = useTheme()
+  const { currentUserId, setCurrentUserId, currentSessionId, setCurrentSessionId } = useUserStore()
   const [isRecording, setIsRecording] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [transcription, setTranscription] = useState<string | null>(null)
@@ -33,39 +35,132 @@ const AudioTranscription: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [uploadedAudio, setUploadedAudio] = useState<File | null>(null)
   const [progress, setProgress] = useState(0)
+  const [initialized, setInitialized] = useState(false)
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Initialize session when component mounts
+  useEffect(() => {
+    // Check for authentication
+    const token = localStorage.getItem('mindmate_token');
+    const storedUserId = localStorage.getItem('mindmate_user_id');
+    
+    if (!token || !storedUserId) {
+      // For now, allow anonymous usage with a guest ID
+      setCurrentUserId(`guest_${Date.now()}`);
+    } else {
+      setCurrentUserId(storedUserId);
+    }
+  }, []);
+  
+  // Initialize session when userId changes
+  useEffect(() => {
+    if (currentUserId && !initialized) {
+      initializeSession();
+    }
+  }, [currentUserId]);
+
+  const initializeSession = async () => {
+    try {
+      const session = await createSession(currentUserId || 'anonymous');
+      setCurrentSessionId(session.session_id);
+      setInitialized(true);
+      console.log('Session initialized:', session.session_id);
+    } catch (err) {
+      console.error("Failed to create session:", err);
+      setError("Failed to initialize session. Please try again.");
+    }
+  };
+
   // Start recording audio
   const startRecording = async () => {
+    if (!currentSessionId) {
+      setError("No active session. Please wait for session initialization.");
+      return;
+    }
+
     try {
       setError(null)
       setTranscription(null)
       setEmotionAnalysis(null)
       setAudioUrl(null)
       
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream)
-      mediaRecorderRef.current = mediaRecorder
+      // Request audio with specific constraints for better compatibility
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          channelCount: 1,          // Mono recording
+          sampleRate: 44100,        // Standard sample rate
+          echoCancellation: true,   // Enable echo cancellation
+          noiseSuppression: true,   // Enable noise suppression
+        } 
+      })
       
-      audioChunksRef.current = []
-      mediaRecorder.ondataavailable = (e) => {
-        audioChunksRef.current.push(e.data)
+      // Use specific MIME type and configure the recorder
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : 'audio/mp4';
+
+      const options = { 
+        mimeType,
+        audioBitsPerSecond: 128000  // 128kbps bitrate
       }
       
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' })
+      console.log(`Using MIME type: ${mimeType}`);
+      
+      // Create the media recorder with options
+      const mediaRecorder = new MediaRecorder(stream, options)
+      mediaRecorderRef.current = mediaRecorder
+      
+      // Initialize chunks array
+      audioChunksRef.current = []
+      
+      // Setup data handler - use timeslice to get data during recording
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          console.log(`Received audio chunk: ${e.data.size} bytes`);
+          audioChunksRef.current.push(e.data)
+        }
+      }
+      
+      // Setup stop handler
+      mediaRecorder.onstop = async () => {
+        console.log(`Recording stopped. Total chunks: ${audioChunksRef.current.length}`);
+        
+        if (audioChunksRef.current.length === 0) {
+          setError("No audio data was recorded. Please try again.");
+          return;
+        }
+        
+        // Create blob with the same MIME type used for recording
+        const audioBlob = new Blob(audioChunksRef.current, { 
+          type: mediaRecorder.mimeType || 'audio/webm' 
+        });
+        console.log(`Audio blob created. Size: ${audioBlob.size} bytes, Type: ${audioBlob.type}`);
+        
+        if (audioBlob.size < 100) {
+          setError("Recorded audio is too short or empty. Please try again.");
+          return;
+        }
+        
         const url = URL.createObjectURL(audioBlob)
         setAudioUrl(url)
         
-        // Process automatically after recording
-        processAudioFile(audioBlob)
+        try {
+          // Process automatically after recording
+          await processAudioFile(audioBlob);
+        } catch (err: any) {
+          console.error("Failed to process audio:", err);
+          setError(err.message || "Failed to process audio. Please try again.");
+        }
       }
       
-      mediaRecorder.start()
+      // Start recording with 10ms timeslice to get frequent chunks
+      mediaRecorder.start(10)
       setIsRecording(true)
+      
+      console.log("Recording started");
     } catch (err) {
       console.error("Error accessing microphone:", err)
       setError("Could not access microphone. Please check your browser permissions.")
@@ -96,34 +191,53 @@ const AudioTranscription: React.FC = () => {
   }
   
   // Process audio file (recorded or uploaded)
-  const processAudioFile = async (audioFile: Blob) => {
-    setLoading(true)
-    setProgress(0)
-    const progressInterval = setInterval(() => {
-      setProgress(prev => Math.min(prev + 5, 95))
-    }, 300)
+const processAudioFile = async (audioFile: Blob) => {
+    if (!currentSessionId) {
+        setError("No active session. Please try again.");
+        return;
+    }
     
     try {
-      const result = await transcribeAudio(audioFile)
-      
-      clearInterval(progressInterval)
-      setProgress(100)
-      
-      if (result.text) {
-        setTranscription(result.text)
-      }
-      
-      if (result.emotions) {
-        setEmotionAnalysis(result.emotions)
-      }
+        setLoading(true);
+        setError(null);
+        setProgress(0);
+        
+        let processedBlob = audioFile;
+        if (!audioFile.type.includes('audio/')) {
+            processedBlob = new Blob([audioFile], { type: 'audio/webm' });
+        }
+        
+        console.log(`Processing audio file: Size=${processedBlob.size} bytes, Type=${processedBlob.type}`);
+        
+        const result = await transcribeAudio(
+            processedBlob,
+            currentUserId || undefined,
+            currentSessionId
+        );
+        
+        if (result.error) {
+            throw new Error(result.error);
+        }
+        
+        setProgress(100);
+        setTranscription(result.transcription || "No speech detected");  // Changed from result.text
+        setEmotionAnalysis(result.emotion_analysis || {});              // Changed from result.emotions
+        
+        console.log("Transcription result:", result);
+        
     } catch (err: any) {
-      console.error("Transcription failed:", err)
-      setError(err.message || "Failed to transcribe audio")
+        console.error("Audio processing error:", err);
+        if (err.response?.status === 400) {
+            setError("Invalid audio format. Please try recording again.");
+        } else {
+            setError(err.message || "Failed to process audio. Please try again.");
+        }
+        setTranscription(null);
+        setEmotionAnalysis(null);
     } finally {
-      setLoading(false)
-      setTimeout(() => setProgress(0), 1000)
+        setLoading(false);
     }
-  }
+}
   
   // Process uploaded file
   const processUploadedFile = () => {

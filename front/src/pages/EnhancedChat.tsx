@@ -55,6 +55,7 @@ const ChatPage = () => {
     const [crisisAlert, setCrisisAlert] = useState<boolean>(false);
     const [lastAnalysis, setLastAnalysis] = useState<any>(null);
     const [showAnalysis, setShowAnalysis] = useState(false);
+    const [error, setError] = useState<string>("");
     
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
@@ -129,25 +130,61 @@ const ChatPage = () => {
 
     const startRecording = async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorderRef.current = new MediaRecorder(stream);
+            setError("");
+            
+            // Request audio with specific constraints for better compatibility
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    channelCount: 1,          // Mono recording
+                    sampleRate: 44100,        // Standard sample rate
+                    echoCancellation: true,   // Enable echo cancellation
+                    noiseSuppression: true,   // Enable noise suppression
+                } 
+            });
+            
+            // Use specific MIME type and configure the recorder
+            const options = { 
+                mimeType: 'audio/webm; codecs=opus',     // Use webm for better compatibility
+                audioBitsPerSecond: 128000  // 128kbps bitrate
+            };
+            
+            mediaRecorderRef.current = new MediaRecorder(stream, options);
             audioChunksRef.current = [];
+            
+            console.log("Chat: Recording started with audio/webm format");
 
             mediaRecorderRef.current.ondataavailable = (event) => {
-                if (event.data.size > 0) {
+                if (event.data && event.data.size > 0) {
+                    console.log(`Chat: Received audio chunk: ${event.data.size} bytes`);
                     audioChunksRef.current.push(event.data);
                 }
             };
 
             mediaRecorderRef.current.onstop = () => {
-                const audioBlob = new Blob(audioChunksRef.current, { type: "audio/wav" });
+                console.log(`Chat: Recording stopped. Total chunks: ${audioChunksRef.current.length}`);
+                
+                if (audioChunksRef.current.length === 0) {
+                    setError("No audio data was recorded. Please try again.");
+                    return;
+                }
+                
+                // Create audio blob from the recorded chunks
+                const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+                console.log(`Chat: Audio blob created. Size: ${audioBlob.size} bytes`);
+                
+                if (audioBlob.size < 100) {
+                    setError("Recorded audio is too short or empty. Please try again.");
+                    return;
+                }
+                
                 const audioUrl = URL.createObjectURL(audioBlob);
                 setAudioUrl(audioUrl);
 
                 // Use the transcription API to get the text
                 transcribeAudio(audioBlob)
                     .then(result => {
-                        const transcription = result.transcription || "[Audio could not be transcribed]";
+                        console.log("Chat: Transcription succeeded:", result);
+                        const transcription = result.text || "[Audio could not be transcribed]";
                         const emotions = result.emotions ? 
                             `(Detected emotions: ${Object.entries(result.emotions)
                                 .map(([emotion, score]) => `${emotion}: ${(Number(score) * 100).toFixed(0)}%`)
@@ -165,7 +202,7 @@ const ChatPage = () => {
                         generateAIResponse(transcription, audioBlob);
                     })
                     .catch(error => {
-                        console.error("Transcription failed:", error);
+                        console.error("Chat: Transcription failed:", error);
                         const audioMessage = {
                             id: Date.now().toString(),
                             type: "user" as const,
@@ -179,10 +216,12 @@ const ChatPage = () => {
                     });
             };
 
-            mediaRecorderRef.current.start();
+            // Start recording with 10ms timeslice to get frequent chunks
+            mediaRecorderRef.current.start(10);
             setIsRecording(true);
-        } catch (err) {
-            console.error("Error starting recording:", err);
+        } catch (error) {
+            console.error("Error starting recording:", error);
+            setError("Could not access microphone. Please check permissions.");
         }
     };
 
@@ -552,6 +591,17 @@ const ChatPage = () => {
                             </div>
                         </div>
                     ))}
+
+                    {error && (
+                        <div className="flex justify-center my-4">
+                            <div className={`rounded-lg px-4 py-3 max-w-lg bg-red-100 border border-red-300 text-red-800`}>
+                                <div className="flex items-center">
+                                    <AlertTriangle className="h-5 w-5 mr-2" />
+                                    <span>{error}</span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {isStreaming && (
                         <div className="flex justify-start">
